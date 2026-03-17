@@ -1,150 +1,12 @@
-import itertools
+import random
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-
-
-# 5x7 bitmap templates for digits 0-9
-DIGIT_TEMPLATES = {
-    0: [
-        "01110",
-        "10001",
-        "10011",
-        "10101",
-        "11001",
-        "10001",
-        "01110",
-    ],
-    1: [
-        "00100",
-        "01100",
-        "00100",
-        "00100",
-        "00100",
-        "00100",
-        "01110",
-    ],
-    2: [
-        "01110",
-        "10001",
-        "00001",
-        "00010",
-        "00100",
-        "01000",
-        "11111",
-    ],
-    3: [
-        "11110",
-        "00001",
-        "00001",
-        "01110",
-        "00001",
-        "00001",
-        "11110",
-    ],
-    4: [
-        "00010",
-        "00110",
-        "01010",
-        "10010",
-        "11111",
-        "00010",
-        "00010",
-    ],
-    5: [
-        "11111",
-        "10000",
-        "10000",
-        "11110",
-        "00001",
-        "00001",
-        "11110",
-    ],
-    6: [
-        "01110",
-        "10000",
-        "10000",
-        "11110",
-        "10001",
-        "10001",
-        "01110",
-    ],
-    7: [
-        "11111",
-        "00001",
-        "00010",
-        "00100",
-        "01000",
-        "01000",
-        "01000",
-    ],
-    8: [
-        "01110",
-        "10001",
-        "10001",
-        "01110",
-        "10001",
-        "10001",
-        "01110",
-    ],
-    9: [
-        "01110",
-        "10001",
-        "10001",
-        "01111",
-        "00001",
-        "00001",
-        "01110",
-    ],
-}
-
-
-def parse_templates() -> np.ndarray:
-    rows = []
-    for digit in range(10):
-        bitmap = DIGIT_TEMPLATES[digit]
-        flat = [int(pixel) for line in bitmap for pixel in line]
-        rows.append(flat)
-    return np.array(rows, dtype=np.float64)
-
-
-def one_hot(indexes: np.ndarray, n_classes: int) -> np.ndarray:
-    out = np.zeros((indexes.shape[0], n_classes), dtype=np.float64)
-    out[np.arange(indexes.shape[0]), indexes] = 1.0
-    return out
-
-
-def make_dataset(
-    samples_per_class: int = 25,
-    noise_probability: float = 0.08,
-    train_ratio: float = 0.8,
-    seed: int = 42,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    templates = parse_templates()
-
-    x_samples, y_samples = [], []
-    for cls, template in enumerate(templates):
-        for _ in range(samples_per_class):
-            noisy = template.copy()
-            flips = rng.random(noisy.shape[0]) < noise_probability
-            noisy[flips] = 1.0 - noisy[flips]
-            x_samples.append(noisy)
-            y_samples.append(cls)
-
-    x = np.array(x_samples, dtype=np.float64)
-    y = np.array(y_samples, dtype=np.int32)
-
-    indices = rng.permutation(x.shape[0])
-    x = x[indices]
-    y = y[indices]
-
-    split_idx = int(train_ratio * x.shape[0])
-    x_train, x_test = x[:split_idx], x[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-
-    return x_train, one_hot(y_train, 10), x_test, y_test
+from PIL import Image, ImageOps, ImageTk
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
 
 @dataclass
@@ -153,7 +15,7 @@ class Activation:
     derivative: Callable[[np.ndarray, np.ndarray], np.ndarray]
 
 
-ACTIVATIONS = {
+ACTIVATIONS: Dict[str, Activation] = {
     "sigmoid": Activation(
         forward=lambda z: 1.0 / (1.0 + np.exp(-z)),
         derivative=lambda z, a: a * (1.0 - a),
@@ -170,22 +32,22 @@ ACTIVATIONS = {
 
 
 class MLP:
-    def __init__(self, layer_sizes: List[int], activation_name: str, learning_rate: float, seed: int = 0):
+    def __init__(self, layer_sizes: Sequence[int], activation_name: str, learning_rate: float, seed: int = 0):
         if activation_name not in ACTIVATIONS:
-            raise ValueError(f"Unknown activation: {activation_name}")
-        self.layer_sizes = layer_sizes
+            raise ValueError(f"Неизвестная функция активации: {activation_name}")
+        self.layer_sizes = list(layer_sizes)
         self.activation = ACTIVATIONS[activation_name]
         self.learning_rate = learning_rate
-        self.rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(seed)
 
         self.weights = []
         self.biases = []
-        for in_dim, out_dim in zip(layer_sizes[:-1], layer_sizes[1:]):
+        for in_dim, out_dim in zip(self.layer_sizes[:-1], self.layer_sizes[1:]):
             limit = np.sqrt(6.0 / (in_dim + out_dim))
-            self.weights.append(self.rng.uniform(-limit, limit, size=(in_dim, out_dim)))
+            self.weights.append(rng.uniform(-limit, limit, size=(in_dim, out_dim)))
             self.biases.append(np.zeros((1, out_dim), dtype=np.float64))
 
-    def forward(self, x: np.ndarray):
+    def _forward(self, x: np.ndarray) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         activations = [x]
         zs = []
         a = x
@@ -196,28 +58,18 @@ class MLP:
             activations.append(a)
         return activations, zs
 
-    def predict(self, x: np.ndarray) -> np.ndarray:
-        a = x
-        for w, b in zip(self.weights, self.biases):
-            a = self.activation.forward(a @ w + b)
-        return np.argmax(a, axis=1)
-
-    def fit(self, x: np.ndarray, y: np.ndarray, epochs: int = 1000):
+    def fit(self, x: np.ndarray, y: np.ndarray, epochs: int = 1000) -> None:
         n = x.shape[0]
         for _ in range(epochs):
-            activations, zs = self.forward(x)
-
+            activations, zs = self._forward(x)
             delta = (activations[-1] - y) * self.activation.derivative(zs[-1], activations[-1])
             grad_w = [None] * len(self.weights)
             grad_b = [None] * len(self.biases)
-
             grad_w[-1] = activations[-2].T @ delta / n
             grad_b[-1] = np.mean(delta, axis=0, keepdims=True)
 
             for l in range(2, len(self.layer_sizes)):
-                z = zs[-l]
-                a = activations[-l]
-                delta = (delta @ self.weights[-l + 1].T) * self.activation.derivative(z, a)
+                delta = (delta @ self.weights[-l + 1].T) * self.activation.derivative(zs[-l], activations[-l])
                 grad_w[-l] = activations[-l - 1].T @ delta / n
                 grad_b[-l] = np.mean(delta, axis=0, keepdims=True)
 
@@ -225,60 +77,230 @@ class MLP:
                 self.weights[i] -= self.learning_rate * grad_w[i]
                 self.biases[i] -= self.learning_rate * grad_b[i]
 
+    def predict_logits(self, x: np.ndarray) -> np.ndarray:
+        a = x
+        for w, b in zip(self.weights, self.biases):
+            a = self.activation.forward(a @ w + b)
+        return a
 
-def run_experiments():
-    x_train, y_train, x_test, y_test = make_dataset()
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        return np.argmax(self.predict_logits(x), axis=1)
 
-    hidden_variants = {
-        0: [],
-        1: [24],
-        2: [32, 16],
-    }
-    learning_rates = [0.01, 0.05, 0.1]
-    activation_names = ["sigmoid", "tanh", "arctan"]
-    epochs = 1000
 
-    results = []
-    for activation_name, hidden_layers, lr in itertools.product(
-        activation_names,
-        sorted(hidden_variants.keys()),
-        learning_rates,
-    ):
-        architecture = [x_train.shape[1], *hidden_variants[hidden_layers], y_train.shape[1]]
-        model = MLP(architecture, activation_name=activation_name, learning_rate=lr, seed=7)
-        model.fit(x_train, y_train, epochs=epochs)
-        pred = model.predict(x_test)
-        acc = float(np.mean(pred == y_test))
-        results.append(
-            {
-                "activation": activation_name,
-                "hidden_layers": hidden_layers,
-                "architecture": architecture,
-                "learning_rate": lr,
-                "accuracy": acc,
-            }
+def one_hot(y: np.ndarray, n_classes: int) -> np.ndarray:
+    out = np.zeros((len(y), n_classes), dtype=np.float64)
+    out[np.arange(len(y)), y] = 1.0
+    return out
+
+
+def load_dataset_from_folder(folder: Path, image_size: int) -> Tuple[np.ndarray, np.ndarray, List[str], List[Path]]:
+    if not folder.exists() or not folder.is_dir():
+        raise ValueError("Папка с эталонами не найдена")
+
+    class_dirs = sorted([d for d in folder.iterdir() if d.is_dir()])
+    if not class_dirs:
+        raise ValueError("В папке эталонов нет подпапок классов")
+
+    x_data: List[np.ndarray] = []
+    y_data: List[int] = []
+    labels: List[str] = []
+    all_files: List[Path] = []
+
+    for class_idx, class_dir in enumerate(class_dirs):
+        labels.append(class_dir.name)
+        image_files = sorted([p for p in class_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}])
+        for img_path in image_files:
+            vector = image_to_vector(img_path, image_size)
+            x_data.append(vector)
+            y_data.append(class_idx)
+            all_files.append(img_path)
+
+    if not x_data:
+        raise ValueError("Эталонные изображения не найдены")
+
+    return np.vstack(x_data), np.array(y_data, dtype=np.int32), labels, all_files
+
+
+def image_to_vector(path: Path, image_size: int) -> np.ndarray:
+    img = Image.open(path).convert("L")
+    img = ImageOps.fit(img, (image_size, image_size))
+    arr = np.asarray(img, dtype=np.float64) / 255.0
+    return arr.reshape(1, -1)
+
+
+class App:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Распознавание образов (MLP)")
+        self.root.geometry("950x650")
+
+        self.train_dir: Optional[Path] = None
+        self.random_dir: Optional[Path] = None
+        self.labels: List[str] = []
+        self.model: Optional[MLP] = None
+        self.image_size = tk.IntVar(value=28)
+
+        self._preview_ref = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        main = ttk.Frame(self.root, padding=12)
+        main.pack(fill="both", expand=True)
+
+        settings = ttk.LabelFrame(main, text="Параметры сети", padding=8)
+        settings.pack(fill="x", pady=6)
+
+        self.activation_var = tk.StringVar(value="tanh")
+        self.hidden_var = tk.StringVar(value="64,32")
+        self.lr_var = tk.DoubleVar(value=0.05)
+        self.epochs_var = tk.IntVar(value=1000)
+
+        ttk.Label(settings, text="Активация:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(settings, textvariable=self.activation_var, values=list(ACTIVATIONS.keys()), state="readonly", width=10).grid(row=0, column=1, padx=6)
+
+        ttk.Label(settings, text="Скрытые слои (через запятую):").grid(row=0, column=2, sticky="w")
+        ttk.Entry(settings, textvariable=self.hidden_var, width=18).grid(row=0, column=3, padx=6)
+
+        ttk.Label(settings, text="Норма обучения:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(settings, textvariable=self.lr_var, values=[0.01, 0.05, 0.1], state="readonly", width=10).grid(row=1, column=1, padx=6, pady=(8, 0))
+
+        ttk.Label(settings, text="Эпохи:").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(settings, textvariable=self.epochs_var, width=10).grid(row=1, column=3, padx=6, pady=(8, 0), sticky="w")
+
+        ttk.Label(settings, text="Размер изображения:").grid(row=1, column=4, sticky="w", pady=(8, 0))
+        ttk.Entry(settings, textvariable=self.image_size, width=8).grid(row=1, column=5, padx=6, pady=(8, 0), sticky="w")
+
+        actions = ttk.LabelFrame(main, text="Данные", padding=8)
+        actions.pack(fill="x", pady=6)
+
+        ttk.Button(actions, text="1) Выбрать папку эталонов", command=self.select_train_folder).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ttk.Button(actions, text="2) Обучить сеть", command=self.train_network).grid(row=0, column=1, padx=4, pady=4, sticky="w")
+        ttk.Button(actions, text="3) Загрузить изображение для распознавания", command=self.recognize_manual_image).grid(row=0, column=2, padx=4, pady=4, sticky="w")
+        ttk.Button(actions, text="Папка случайных изображений", command=self.select_random_folder).grid(row=1, column=0, padx=4, pady=4, sticky="w")
+        ttk.Button(actions, text="Распознать случайное из папки", command=self.recognize_random_from_folder).grid(row=1, column=1, padx=4, pady=4, sticky="w")
+
+        self.info_label = ttk.Label(actions, text="Папка эталонов не выбрана")
+        self.info_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        output = ttk.PanedWindow(main, orient=tk.HORIZONTAL)
+        output.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(output, text="Журнал")
+        right = ttk.LabelFrame(output, text="Предпросмотр")
+        output.add(left, weight=3)
+        output.add(right, weight=2)
+
+        self.log = tk.Text(left, wrap="word", state="disabled")
+        self.log.pack(fill="both", expand=True)
+
+        self.preview = ttk.Label(right, text="Здесь появится изображение")
+        self.preview.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _append_log(self, text: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", text + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _parse_hidden_layers(self) -> List[int]:
+        raw = self.hidden_var.get().strip()
+        if not raw:
+            return []
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+    def select_train_folder(self) -> None:
+        selected = filedialog.askdirectory(title="Выберите папку с эталонными изображениями")
+        if not selected:
+            return
+        self.train_dir = Path(selected)
+        self.info_label.config(text=f"Папка эталонов: {self.train_dir}")
+        self._append_log(f"Выбрана папка эталонов: {self.train_dir}")
+
+    def select_random_folder(self) -> None:
+        selected = filedialog.askdirectory(title="Выберите папку со случайными изображениями")
+        if not selected:
+            return
+        self.random_dir = Path(selected)
+        self._append_log(f"Выбрана папка случайных изображений: {self.random_dir}")
+
+    def train_network(self) -> None:
+        if not self.train_dir:
+            messagebox.showwarning("Внимание", "Сначала выберите папку эталонов")
+            return
+
+        try:
+            image_size = int(self.image_size.get())
+            x, y, self.labels, files = load_dataset_from_folder(self.train_dir, image_size)
+            hidden = self._parse_hidden_layers()
+            architecture = [x.shape[1], *hidden, len(self.labels)]
+            self.model = MLP(
+                architecture,
+                activation_name=self.activation_var.get(),
+                learning_rate=float(self.lr_var.get()),
+                seed=7,
+            )
+            self.model.fit(x, one_hot(y, len(self.labels)), epochs=int(self.epochs_var.get()))
+            pred = self.model.predict(x)
+            train_acc = float(np.mean(pred == y))
+            self._append_log(f"Обучение завершено. Классов: {len(self.labels)}, изображений: {len(files)}")
+            self._append_log(f"Архитектура: {architecture}")
+            self._append_log(f"Точность на обучении: {train_acc:.4f}")
+            messagebox.showinfo("Успех", "Сеть обучена")
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc))
+
+    def _show_preview(self, path: Path) -> None:
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((340, 340))
+        tk_img = ImageTk.PhotoImage(img)
+        self.preview.configure(image=tk_img, text="")
+        self.preview.image = tk_img
+
+    def _recognize_path(self, path: Path) -> None:
+        if self.model is None:
+            messagebox.showwarning("Внимание", "Сначала обучите сеть")
+            return
+
+        vector = image_to_vector(path, int(self.image_size.get()))
+        logits = self.model.predict_logits(vector)[0]
+        idx = int(np.argmax(logits))
+        confidence = float(logits[idx])
+        label = self.labels[idx] if idx < len(self.labels) else str(idx)
+        self._append_log(f"Распознавание: {path.name} -> {label} (оценка: {confidence:.4f})")
+        self._show_preview(path)
+
+    def recognize_manual_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выберите изображение для распознавания",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")],
         )
+        if not path:
+            return
+        try:
+            self._recognize_path(Path(path))
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc))
 
-    results.sort(key=lambda r: r["accuracy"], reverse=True)
+    def recognize_random_from_folder(self) -> None:
+        if not self.random_dir:
+            messagebox.showwarning("Внимание", "Сначала выберите папку случайных изображений")
+            return
+        files = [p for p in self.random_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}]
+        if not files:
+            messagebox.showwarning("Внимание", "В папке нет изображений")
+            return
+        random_path = random.choice(files)
+        try:
+            self._recognize_path(random_path)
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc))
 
-    print("Результаты экспериментов (по убыванию точности):")
-    print("-" * 88)
-    print(f"{'Activation':<12} {'Hidden':<6} {'LearningRate':<12} {'Architecture':<18} {'Accuracy':<8}")
-    print("-" * 88)
-    for r in results:
-        print(
-            f"{r['activation']:<12} {r['hidden_layers']:<6} {r['learning_rate']:<12.2f} "
-            f"{str(r['architecture']):<18} {r['accuracy']:.4f}"
-        )
 
-    best = results[0]
-    print("\nОптимальные параметры сети:")
-    print(f"- Функция активации: {best['activation']}")
-    print(f"- Количество скрытых слоёв: {best['hidden_layers']}")
-    print(f"- Архитектура: {best['architecture']}")
-    print(f"- Норма обучения: {best['learning_rate']}")
-    print(f"- Точность на тестовой выборке: {best['accuracy']:.4f}")
+def main() -> None:
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    run_experiments()
+    main()
